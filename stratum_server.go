@@ -78,6 +78,7 @@ func getBlockTemplate() (*BlockTemplate, error) {
 	}
 	defer resp.Body.Close()
 
+	fmt.Printf("Response : %+v and error %+v\n",resp,err)
 	var rpcResp struct {
 		Result BlockTemplate `json:"result"`
 		Error  interface{}   `json:"error"`
@@ -85,6 +86,7 @@ func getBlockTemplate() (*BlockTemplate, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
 		return nil, err
 	}
+	fmt.Printf("Actual Error : %+v",rpcResp.Error)
 	if rpcResp.Error != nil {
 		return nil, errors.New("RPC error in getBlockTemplate")
 	}
@@ -112,7 +114,8 @@ var headerMap = struct {
 // var testTarget = "0001000000000000000000000000000000000000000000000000000000000000"
 // var testTarget = "0000000000400000000000000000000000000000000000000000000000000000" 
 				//   0000000100000000000000000000000000000000000000000000000000000000    // diff 1024
-var testTarget = "0198f20000000000000000000000000000000000000000000000000000000000" // diff 256
+				  
+var testTarget = "000198f200000000000000000000000000000000000000000000000000000000" // diff 256
 
 
 // all other data such as task and magicNum in little endian hex
@@ -151,7 +154,7 @@ func CompactToBig(compact uint32) *big.Int {
 
 // 发送 mining.notify 消息
 func sendNotifyMessage(client *Client) error {
-	// fmt.Println("\n\nSending notification \n\n")
+	fmt.Printf("\n\nSending notification called for jobId %v\n\n",client.id)
 	if !client.subscribed || !client.authorized {
 		return nil
 	}
@@ -181,6 +184,7 @@ func sendNotifyMessage(client *Client) error {
 	off += 32
     
 	nbits, _ := strconv.ParseUint(tpl.PoWDiffReference.Nbits, 16, 32)
+	
 	binary.LittleEndian.PutUint32(header[off:], uint32(nbits))
 	off += 4
     
@@ -229,6 +233,12 @@ func sendNotifyMessage(client *Client) error {
     headerMap.Unlock()
     // fmt.Printf("\n\nTask : %v and id %v\n\n",task,strconv.FormatUint(client.id, 10))
 	fmt.Println("Sending template !!")
+	comBits := CompactToBig(uint32(nbits)).Text(16)
+	target := fmt.Sprintf("%64s",comBits)
+	target = strings.ReplaceAll(target, " ", "0")
+	fmt.Printf("Target , %v difficulty %v\n: ",target,nbits)
+	sendSetTargetMessage(client, target)
+
 	msg := StratumMessage{
 		ID:     nil,
 		Method: "mining.notify",
@@ -257,7 +267,7 @@ func sendNotifyMessage(client *Client) error {
 
 // 每 5 秒发送一次 mining.notify 消息
 func sendPeriodicNotify(client *Client) {
-	ticker := time.NewTicker(20000 * time.Millisecond)
+	ticker := time.NewTicker(1500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
@@ -302,7 +312,7 @@ func handleConnection(conn net.Conn) {
 		}
 
 		var msg StratumMessage
-		
+		// fmt.Println("Buffer : ",buf)
 		err = json.Unmarshal(buf[:n], &msg)
 		if err != nil {
 			log.Printf("Error unmarshaling JSON: %v", err)
@@ -388,7 +398,7 @@ func handleSubscribe(client *Client, id interface{}) {
 
 	sendResponse(client.conn, response)
 	// fmt.Println("Setting diff i !")
-	sendSetTargetMessage(client, testTarget)
+	// sendSetTargetMessage(client, testTarget)
 }
 
 // 处理授权消息
@@ -483,18 +493,19 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 		return
 	}
 
+	
 	if len(params) < 3 {
 		sendErrorResponse(client.conn, id, -32602, "Invalid params")
 		return
 	}
-
+	
 	// 简单模拟提交处理
 	log.Printf("Received share submission: %+v", params)
 	username, _ := params[0].(string)
 	jobid, _ := params[1].(string)
 	nonce, _ := params[2].(string)
 	fmt.Printf("username %s jobid %s nonce %s\n", username, jobid, nonce)
-
+	
 	// new a BLAKE2s hash
 	// hash, err := blake2sext.New256(nil)
 	hash1, err := blake2sext.New256(nil)
@@ -503,13 +514,11 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 		sendErrorResponse(client.conn, id, -32001, "something error happen in server")
 		return
 	}
-
+	
 	decimalUint, err := strconv.ParseUint(jobid, 10, 64) 
     // fmt.Println(decimalUint)
 	if err != nil {
 		fmt.Printf("str to int failed %v\n", err)
-	} else {
-		fmt.Printf("str to int %08x\n", decimalUint)
 	}
 	//hexString := testTask
 	str := fmt.Sprintf("%012x", decimalUint)
@@ -577,14 +586,15 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 				// fmt.Println("compare failed")
 				respMsg = "low difficulty share"
 			}
-		} else {
-			fmt.Println("change target to big number failed please check the input string")
-		}
+			} else {
+				fmt.Println("change target to big number failed please check the input string")
+			}
 	} else {
 		fmt.Println("change hash result to big number failed please check the input string")
 	}
 	
     if respRes {
+		// sendNotifyMessage(client)
 		// fmt.Println("All good under target !!")
         // 1) pull back the 144-byte headerHex you cached
         headerMap.RLock()
@@ -622,7 +632,7 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
             })
             return
         }
-        log.Printf("▶ submitted block header, node replied: %+v", result)
+        log.Printf("▶ submitted block header, %+v node replied: %+v",client.id,result)
     }
 
 	sendResponse(client.conn, StratumResponse{
@@ -630,6 +640,7 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 		Result: respRes,
 		Error:  respMsg,
 	})
+	fmt.Println("#########################################################################################################")
 }
 
 // 发送响应消息
