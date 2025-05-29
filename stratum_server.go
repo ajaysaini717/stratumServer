@@ -35,7 +35,7 @@ type StratumResponse struct {
 	Error  interface{} `json:"error"`
 }
 
-const rpcURL = "http://172.16.15.105:38131"
+const rpcURL = "http://3.82.8.175:38131"
 const rpcUser = "test"
 const rpcPassword = "test"
 
@@ -50,6 +50,7 @@ type BlockTemplate struct {
 		Nbits string `json:"nbits"`
 	} `json:"pow_diff_reference"`
 	CurTime         int    `json:"curtime"`
+	PreviousHash string `json:"previousblockhash"`
 	Height          int64  `json:"height"`
 	CoinbaseAddress string `json:"coinbase_address"`
 	Reward          uint64 `json:"reward"`
@@ -78,7 +79,7 @@ func getBlockTemplate() (*BlockTemplate, error) {
 	}
 	defer resp.Body.Close()
 
-	fmt.Printf("Response : %+v and error %+v\n",resp,err)
+	// fmt.Printf("Response : %+v and error %+v\n",resp,err)
 	var rpcResp struct {
 		Result BlockTemplate `json:"result"`
 		Error  interface{}   `json:"error"`
@@ -86,7 +87,7 @@ func getBlockTemplate() (*BlockTemplate, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
 		return nil, err
 	}
-	fmt.Printf("Actual Error : %+v",rpcResp.Error)
+	// fmt.Printf("Actual Error : %+v",rpcResp.Error)	
 	if rpcResp.Error != nil {
 		return nil, errors.New("RPC error in getBlockTemplate")
 	}
@@ -154,7 +155,7 @@ func CompactToBig(compact uint32) *big.Int {
 
 // 发送 mining.notify 消息
 func sendNotifyMessage(client *Client) error {
-	fmt.Printf("\n\nSending notification called for jobId %v\n\n",client.id)
+	// fmt.Printf("\n\nSending notification called for jobId %v\n\n",client.id)
 	if !client.subscribed || !client.authorized {
 		return nil
 	}
@@ -171,7 +172,7 @@ func sendNotifyMessage(client *Client) error {
 	binary.LittleEndian.PutUint32(header[off:], uint32(tpl.Version))
 	off += 4
     
-	parent, _ := hex.DecodeString(strings.TrimPrefix(tpl.Parents[0].Data, "0x"))
+	parent, _ := hex.DecodeString(strings.TrimPrefix(tpl.PreviousHash, "0x"))
 	copy(header[off:], parent)
 	off += 32
     
@@ -232,11 +233,12 @@ func sendNotifyMessage(client *Client) error {
 	// fmt.Printf("SIZE : %+v",len(headerHex))
     headerMap.Unlock()
     // fmt.Printf("\n\nTask : %v and id %v\n\n",task,strconv.FormatUint(client.id, 10))
-	fmt.Println("Sending template !!")
+	fmt.Printf("Sending template ==> ")
 	comBits := CompactToBig(uint32(nbits)).Text(16)
 	target := fmt.Sprintf("%64s",comBits)
 	target = strings.ReplaceAll(target, " ", "0")
-	fmt.Printf("Target , %v difficulty %v\n: ",target,nbits)
+	fmt.Printf("difficulty %v\n ",nbits)
+	testTarget =  target
 	sendSetTargetMessage(client, target)
 
 	msg := StratumMessage{
@@ -312,7 +314,6 @@ func handleConnection(conn net.Conn) {
 		}
 
 		var msg StratumMessage
-		// fmt.Println("Buffer : ",buf)
 		err = json.Unmarshal(buf[:n], &msg)
 		if err != nil {
 			log.Printf("Error unmarshaling JSON: %v", err)
