@@ -35,7 +35,7 @@ type StratumResponse struct {
 	Error  interface{} `json:"error"`
 }
 
-const rpcURL = "http://3.82.8.175:38131"
+const rpcURL = "http://127.0.0.1:38131"
 const rpcUser = "test"
 const rpcPassword = "test"
 
@@ -77,7 +77,6 @@ func getBlockTemplate() (*BlockTemplate, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
 	// fmt.Printf("Response : %+v and error %+v\n",resp,err)
 	var rpcResp struct {
@@ -89,6 +88,7 @@ func getBlockTemplate() (*BlockTemplate, error) {
 	}
 	// fmt.Printf("Actual Error : %+v",rpcResp.Error)	
 	if rpcResp.Error != nil {
+		fmt.Printf("ERORROR : %+v",rpcResp.Error)
 		return nil, errors.New("RPC error in getBlockTemplate")
 	}
     // fmt.Println(rpcResp.Result)
@@ -162,6 +162,7 @@ func sendNotifyMessage(client *Client) error {
 	// task := str + testTask
 	// fmt.Println(task)
 	tpl, err := getBlockTemplate()
+	// fmt.Printf("tpl is ===> %+v",tpl)
     // fmt.Printf("template is ===> %+v\n",tpl)
 	if err != nil {
         log.Printf("Error fetching blocktemplate: %v", err)
@@ -204,7 +205,8 @@ func sendNotifyMessage(client *Client) error {
 	if off != 144 {
         log.Printf("Warning: header size %d != 144", off)
 	}
-	emptyBytes := make([]byte, 6)
+	emptyBytes := []byte{9, 0, 0, 0, 0, 0}
+
 	header = append(header, emptyBytes...)
 	// diff := uint32(nbits)
 	// target := CompactToBig(diff)
@@ -233,7 +235,7 @@ func sendNotifyMessage(client *Client) error {
 	// fmt.Printf("SIZE : %+v",len(headerHex))
     headerMap.Unlock()
     // fmt.Printf("\n\nTask : %v and id %v\n\n",task,strconv.FormatUint(client.id, 10))
-	fmt.Printf("Sending template ==> ")
+	fmt.Printf("Sending template ==> \n")
 	comBits := CompactToBig(uint32(nbits)).Text(16)
 	target := fmt.Sprintf("%64s",comBits)
 	target = strings.ReplaceAll(target, " ", "0")
@@ -328,15 +330,15 @@ func handleConnection(conn net.Conn) {
 			handleSubscribe(client, msg.ID)
 			if client.subscribed && client.authorized {
 				// fmt.Println("sendNotifyMessage called ")
-				sendNotifyMessage(client)
-				go sendPeriodicNotify(client)
+				// sendNotifyMessage(client)
+				// go sendPeriodicNotify(client)
 			}
 		case "mining.authorize":
 			handleAuthorize(client, msg.ID, msg.Params)
 			if client.subscribed && client.authorized {
 				// fmt.Println("sendNotifyMessage called ")
 				sendNotifyMessage(client)
-				go sendPeriodicNotify(client)
+				// go sendPeriodicNotify(client)
 			}
 		case "mining.submit":
 			handleSubmit(client, msg.ID, msg.Params)
@@ -595,7 +597,7 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 	}
 	
     if respRes {
-		// sendNotifyMessage(client)
+		sendNotifyMessage(client)
 		// fmt.Println("All good under target !!")
         // 1) pull back the 144-byte headerHex you cached
         headerMap.RLock()
@@ -603,15 +605,17 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
         headerMap.RUnlock()
 
         // 2) build fullHeaderHex = headerHex + "0x08" + nonce
-        extraHex := "09"
+        extraHex := "090000000000"
 		// nonceraw,err := toLittleEndianHex(nonce)
 		if err != nil {
 			log.Fatalf("Failed to convert nonce : %v",err)
 		}
 	
 		// fmt.Printf("Length %v and actual %v\n",nonceraw,nonce)
-        fullHeaderHex := headerHex[:144*2] + extraHex + nonce
+        fullHeaderHex := headerHex[:144*2] + extraHex + nonce + magicNum
+		// fullHeaderBytes, _ := hex.DecodeString(fullHeaderHex)
 
+		// fmt.Printf("\nFull header bytes : %+v\n",fullHeaderBytes)
         // 3) parse the two numbers
         extra2Num, _ := strconv.ParseUint(strings.TrimPrefix("0x00", "0x"), 16, 64)
         // nonceNum, _  := strconv.ParseUint(nonce, 16, 64)
