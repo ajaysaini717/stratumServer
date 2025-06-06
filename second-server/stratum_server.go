@@ -35,7 +35,7 @@ type StratumResponse struct {
 	Error  interface{} `json:"error"`
 }
 
-const rpcURL = "http://127.0.0.1:38131"
+const rpcURL = "http://127.0.0.1:48131"
 const rpcUser = "test"
 const rpcPassword = "test"
 
@@ -678,7 +678,7 @@ func sendErrorResponse(conn net.Conn, id interface{}, code int, message string) 
 
 func main() {
 	// 监听指定端口
-	listener, err := net.Listen("tcp", ":3335")
+	listener, err := net.Listen("tcp", ":3334")
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
