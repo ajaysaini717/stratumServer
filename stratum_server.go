@@ -337,17 +337,53 @@ func handleConnection(conn net.Conn) {
 			handleAuthorize(client, msg.ID, msg.Params)
 			if client.subscribed && client.authorized {
 				// fmt.Println("sendNotifyMessage called ")
-				sendNotifyMessage(client)
+				// sendNotifyMessage(client)
 				// go sendPeriodicNotify(client)
+				startTemplateWatcher(client, 100*time.Millisecond)
 			}
 		case "mining.submit":
 			
 			handleSubmit(client, msg.ID, msg.Params)
-			sendNotifyMessage(client)
+			// sendNotifyMessage(client)
 		default:
 			sendErrorResponse(conn, msg.ID, -32601, "Method not found")
 		}
 	}
+}
+
+func startTemplateWatcher(client *Client, interval time.Duration) {
+    var lastTemplateHash string
+
+    go func() {
+        ticker := time.NewTicker(interval)
+        defer ticker.Stop()
+
+        for {
+            select {
+            case <-client.disCh:
+                return
+            case <-ticker.C:
+                tpl, err := getBlockTemplate()
+                if err != nil {
+                    log.Printf("Watcher: failed to fetch template: %v", err)
+                    continue
+                }
+
+                // Compose a hash/fingerprint of the block template
+                templateHash := fmt.Sprintf("%s-%d-%s", tpl.PreviousHash, tpl.CurTime, tpl.TxRoot)
+
+                // If template is new, notify miner
+                if templateHash != lastTemplateHash {
+                    log.Println("Watcher: new template detected, sending mining.notify...")
+                    err := sendNotifyMessage(client)
+                    if err != nil {
+                        log.Printf("Watcher: failed to send notify: %v", err)
+                    }
+                    lastTemplateHash = templateHash
+                }
+            }
+        }
+    }()
 }
 
 func sendSetTargetMessage(client *Client, target string) {
@@ -678,13 +714,13 @@ func sendErrorResponse(conn net.Conn, id interface{}, code int, message string) 
 
 func main() {
 	// 监听指定端口
-	listener, err := net.Listen("tcp", ":3335")
+	listener, err := net.Listen("tcp", ":3334")
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 	defer listener.Close()
 
-	fmt.Println("Stratum server is listening on port 3334...")
+	fmt.Println("Stratum server is listening on port 3333...")
 
 	for {
 		// 接受客户端连接
