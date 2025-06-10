@@ -37,12 +37,13 @@ type StratumResponse struct {
 }
 
 var (
-	rpcURL      = "http://172.16.15.105:38131"
+	rpcURL      = "http://3.21.25.99:38131"
 	rpcUser     = "test"
 	rpcPassword = "test"
 	poolMu      sync.Mutex
-	poolClients      = make(map[*Client]struct{})
-	shareFactor      = 2
+	poolClients = make(map[*Client]struct{})
+	shareFactor = 2
+	blockMu     sync.Mutex
 	blockmined  bool = false
 )
 
@@ -251,7 +252,9 @@ func sendNotifyMessage(client *Client) error {
 		log.Printf("Error sending mining.notify message: %v", err)
 		return err
 	}
+	blockMu.Lock()
 	blockmined = false
+	blockMu.Unlock()
 	return nil
 }
 
@@ -577,7 +580,10 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 		fmt.Println("change hash result to big number failed please check the input string")
 	}
 
-	if blockmined {
+	blockMu.Lock()
+	flag := blockmined
+	blockMu.Unlock()
+	if flag {
 		fmt.Println("Block already mined, not submitting again.")
 		sendResponse(client.conn, StratumResponse{
 			ID:     id,
@@ -611,7 +617,9 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 			})
 			return
 		}
+		blockMu.Lock()
 		blockmined = true
+		blockMu.Unlock()
 		log.Printf("▶ submitted block header, %+v node replied: %+v", client.id, result)
 	}
 
@@ -650,13 +658,13 @@ func sendErrorResponse(conn net.Conn, id interface{}, code int, message string) 
 
 func main() {
 	// 监听指定端口
-	listener, err := net.Listen("tcp", ":3334")
+	listener, err := net.Listen("tcp", ":3333")
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 	defer listener.Close()
 
-	fmt.Println("Stratum server is listening on port 3334...")
+	fmt.Println("Stratum server is listening on port 3333")
 
 	for {
 		// 接受客户端连接
