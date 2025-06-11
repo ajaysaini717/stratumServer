@@ -37,7 +37,7 @@ type StratumResponse struct {
 }
 
 var (
-	rpcURL      = "http://3.21.25.99:38131"
+	rpcURL      = "http://172.16.15.105:38131"
 	rpcUser     = "test"
 	rpcPassword = "test"
 	poolMu      sync.Mutex
@@ -105,15 +105,16 @@ func getBlockTemplate() (*BlockTemplate, error) {
 
 // Client 定义客户端结构体
 type Client struct {
-	conn        net.Conn
-	authorized  bool
-	subscribed  bool
-	mu          sync.Mutex
-	id          uint64
-	disCh       chan struct{}
-	shareCount  uint64
-	testTarget  string
-	shareTarget string
+	conn          net.Conn
+	authorized    bool
+	subscribed    bool
+	mu            sync.Mutex
+	id            uint64
+	disCh         chan struct{}
+	shareCount    uint64
+	testTarget    string
+	shareTarget   string
+	currentHeader string
 }
 
 var headerMap = struct {
@@ -214,6 +215,9 @@ func sendNotifyMessage(client *Client) error {
 	headerMap.Lock()
 	headerMap.m[str] = headerHex
 	headerMap.Unlock()
+	client.mu.Lock()
+	client.currentHeader = headerHex
+	client.mu.Unlock()
 	fmt.Printf("Sending template ==> \n")
 	comBits := CompactToBig(uint32(nbits)).Text(16)
 	target := fmt.Sprintf("%64s", comBits)
@@ -286,19 +290,6 @@ func handleConnection(conn net.Conn) {
 	// buf := make([]byte, 4096)
 	reader := bufio.NewReader(conn)
 	for {
-		// n, err := conn.Read(buf)
-		// if err != nil {
-		// 	log.Printf("Error reading from client: %v", err)
-		// 	return
-		// }
-
-		// var msg StratumMessage
-		// err = json.Unmarshal(buf[:n], &msg)
-		// if err != nil {
-		// 	log.Printf("Error unmarshaling JSON: %v", err)
-		// 	sendErrorResponse(conn, msg.ID, -32700, "Parse error")
-		// 	continue
-		// }
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
 			log.Printf("Error reading from client: %v", err)
@@ -514,8 +505,15 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 	headerMap.RUnlock()
 	if !ok {
 		sendErrorResponse(client.conn, id, -32003, "Unknown jobid")
+		return
 	}
-
+	client.mu.Lock()
+	isCurrent := (task == client.currentHeader)
+	client.mu.Unlock()
+	if !isCurrent {
+		sendErrorResponse(client.conn, id, -32005, "Stale template")
+		return
+	}
 	hexString := task
 	hexString += nonce
 	hexString += magicNum
@@ -580,18 +578,6 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 		fmt.Println("change hash result to big number failed please check the input string")
 	}
 
-	// blockMu.Lock()
-	// flag := blockmined
-	// blockMu.Unlock()
-	// if flag {
-	// 	fmt.Println("Block already mined, not submitting again.")
-	// 	sendResponse(client.conn, StratumResponse{
-	// 		ID:     id,
-	// 		Result: true,
-	// 		Error:  "Block already mined",
-	// 	})
-	// 	return
-	// }
 	if respRes {
 		fmt.Println("YES, valid share found, submitting block header...")
 		headerMap.RLock()
@@ -605,21 +591,6 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 		// 4) fire off RPC
 		result, _ := submitBlockHeader(fullHeaderHex, extra2Num)
 
-		// if err == nil {
-		// checkTemplateAndNotify(client, &lastTemplateHash)
-		// }
-		// fmt.Printf("Error submitting block header: %v\n", err)
-		// if err != nil {
-		// 	sendResponse(client.conn, StratumResponse{
-		// 		ID:     id,
-		// 		Result: false,
-		// 		Error:  fmt.Sprintf("submitBlockHeader error: %v", err),
-		// 	})
-		// 	return
-		// }
-		// blockMu.Lock()
-		// blockmined = true
-		// blockMu.Unlock()
 		log.Printf("▶ submitted block header, %+v node replied: %+v", client.id, result)
 	}
 
@@ -658,13 +629,13 @@ func sendErrorResponse(conn net.Conn, id interface{}, code int, message string) 
 
 func main() {
 	// 监听指定端口
-	listener, err := net.Listen("tcp", ":3333")
+	listener, err := net.Listen("tcp", ":3336")
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 	defer listener.Close()
 
-	fmt.Println("Stratum server is listening on port 3333")
+	fmt.Println("Stratum server is listening on port 3336")
 
 	for {
 		// 接受客户端连接
