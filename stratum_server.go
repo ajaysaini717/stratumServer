@@ -43,8 +43,8 @@ var (
 	poolMu      sync.Mutex
 	poolClients = make(map[*Client]struct{})
 	shareFactor = 2
-	blockMu     sync.Mutex
-	blockmined  bool = false
+	// blockMu     sync.Mutex
+	// blockmined  bool = false
 )
 
 type BlockTemplate struct {
@@ -252,9 +252,9 @@ func sendNotifyMessage(client *Client) error {
 		log.Printf("Error sending mining.notify message: %v", err)
 		return err
 	}
-	blockMu.Lock()
-	blockmined = false
-	blockMu.Unlock()
+	// blockMu.Lock()
+	// blockmined = false
+	// blockMu.Unlock()
 	return nil
 }
 
@@ -580,18 +580,18 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 		fmt.Println("change hash result to big number failed please check the input string")
 	}
 
-	blockMu.Lock()
-	flag := blockmined
-	blockMu.Unlock()
-	if flag {
-		fmt.Println("Block already mined, not submitting again.")
-		sendResponse(client.conn, StratumResponse{
-			ID:     id,
-			Result: true,
-			Error:  "Block already mined",
-		})
-		return
-	}
+	// blockMu.Lock()
+	// flag := blockmined
+	// blockMu.Unlock()
+	// if flag {
+	// 	fmt.Println("Block already mined, not submitting again.")
+	// 	sendResponse(client.conn, StratumResponse{
+	// 		ID:     id,
+	// 		Result: true,
+	// 		Error:  "Block already mined",
+	// 	})
+	// 	return
+	// }
 	if respRes {
 		fmt.Println("YES, valid share found, submitting block header...")
 		headerMap.RLock()
@@ -603,23 +603,23 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 		// 3) parse the two numbers
 		extra2Num, _ := strconv.ParseUint(strings.TrimPrefix("0x00", "0x"), 16, 64)
 		// 4) fire off RPC
-		result, err := submitBlockHeader(fullHeaderHex, extra2Num)
+		result, _ := submitBlockHeader(fullHeaderHex, extra2Num)
 
 		// if err == nil {
 		// checkTemplateAndNotify(client, &lastTemplateHash)
 		// }
-		fmt.Printf("Error submitting block header: %v\n", err)
-		if err != nil {
-			sendResponse(client.conn, StratumResponse{
-				ID:     id,
-				Result: false,
-				Error:  fmt.Sprintf("submitBlockHeader error: %v", err),
-			})
-			return
-		}
-		blockMu.Lock()
-		blockmined = true
-		blockMu.Unlock()
+		// fmt.Printf("Error submitting block header: %v\n", err)
+		// if err != nil {
+		// 	sendResponse(client.conn, StratumResponse{
+		// 		ID:     id,
+		// 		Result: false,
+		// 		Error:  fmt.Sprintf("submitBlockHeader error: %v", err),
+		// 	})
+		// 	return
+		// }
+		// blockMu.Lock()
+		// blockmined = true
+		// blockMu.Unlock()
 		log.Printf("▶ submitted block header, %+v node replied: %+v", client.id, result)
 	}
 
