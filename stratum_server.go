@@ -37,7 +37,7 @@ type StratumResponse struct {
 }
 
 var (
-	rpcURL      = "http://172.16.15.105:38131"
+	rpcURL      = "http://3.21.25.99:38131"
 	rpcUser     = "test"
 	rpcPassword = "test"
 	poolMu      sync.Mutex
@@ -115,6 +115,8 @@ type Client struct {
 	testTarget    string
 	shareTarget   string
 	currentHeader string
+	previousHeader string
+	previousTime time.Time
 }
 
 var headerMap = struct {
@@ -216,6 +218,8 @@ func sendNotifyMessage(client *Client) error {
 	headerMap.m[str] = headerHex
 	headerMap.Unlock()
 	client.mu.Lock()
+	client.previousHeader = client.currentHeader
+	client.previousTime = time.Now()
 	client.currentHeader = headerHex
 	client.mu.Unlock()
 	fmt.Printf("Sending template ==> \n")
@@ -352,12 +356,12 @@ func startTemplateWatcher(client *Client, interval time.Duration) {
 
 				// If template is new, notify miner
 				if templateHash != lastTemplateHash {
+					lastTemplateHash = templateHash
 					log.Println("Watcher: new template detected, sending mining.notify...")
 					err := sendNotifyMessage(client)
 					if err != nil {
 						log.Printf("Watcher: failed to send notify: %v", err)
 					}
-					lastTemplateHash = templateHash
 				}
 			}
 		}
@@ -511,9 +515,12 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 	isCurrent := (task == client.currentHeader)
 	client.mu.Unlock()
 	if !isCurrent {
-		sendErrorResponse(client.conn, id, -32005, "Stale template")
-		return
-	}
+        if !(client.previousHeader != "" && task == client.currentHeader &&
+            time.Since(client.previousTime) <= 300*time.Millisecond) {
+				sendErrorResponse(client.conn, id, -32005, "Stale template")
+				return
+        }
+    }
 	hexString := task
 	hexString += nonce
 	hexString += magicNum
@@ -629,13 +636,13 @@ func sendErrorResponse(conn net.Conn, id interface{}, code int, message string) 
 
 func main() {
 	// 监听指定端口
-	listener, err := net.Listen("tcp", ":3336")
+	listener, err := net.Listen("tcp", ":3333")
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 	defer listener.Close()
 
-	fmt.Println("Stratum server is listening on port 3336")
+	fmt.Println("Stratum server is listening on port 3333")
 
 	for {
 		// 接受客户端连接
