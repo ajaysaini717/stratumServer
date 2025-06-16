@@ -18,18 +18,14 @@ import (
 	"encoding/hex"
 	"math/big"
 
-	// "golang.org/x/crypto/blake2s"
 	"golang.org/x/crypto/blake2sext"
 )
 
-// StratumMessage 定义 Stratum 消息结构体
 type StratumMessage struct {
 	ID     interface{}   `json:"id"`
 	Method string        `json:"method"`
 	Params []interface{} `json:"params"`
 }
-
-// StratumResponse 定义 Stratum 响应结构体
 type StratumResponse struct {
 	ID     interface{} `json:"id"`
 	Result interface{} `json:"result"`
@@ -40,12 +36,24 @@ var (
 	rpcURL      = "http://172.16.15.105:38131"
 	rpcUser     = "test"
 	rpcPassword = "test"
-	poolMu      sync.Mutex
-	poolClients = make(map[*Client]struct{})
+
+	clients   = make(map[*Client]struct{})
+	clientsMu sync.RWMutex
+
 	shareFactor = 2
-	// blockMu     sync.Mutex
-	// blockmined  bool = false
+	jobMu       sync.RWMutex
+	currentJob  *Job
+	lastJob     *Job
+	lastJobTs   time.Time
 )
+
+type Job struct {
+	ID          uint64
+	HeaderHex   string
+	Target      string
+	ShareTarget string
+	CreatedAt   time.Time
+}
 
 type BlockTemplate struct {
 	Version int `json:"version"`
@@ -64,8 +72,16 @@ type BlockTemplate struct {
 	Reward          uint64 `json:"reward"`
 }
 
+type Client struct {
+	conn       net.Conn
+	authorized bool
+	subscribed bool
+	mu         sync.Mutex
+	shareCount uint64
+	currentJob *Job
+}
+
 func getBlockTemplate() (*BlockTemplate, error) {
-	// build request
 	payload := map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      1,
@@ -85,8 +101,7 @@ func getBlockTemplate() (*BlockTemplate, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	// fmt.Printf("Response : %+v and error %+v\n",resp,err)
+	defer resp.Body.Close()
 	var rpcResp struct {
 		Result BlockTemplate `json:"result"`
 		Error  interface{}   `json:"error"`
@@ -94,47 +109,21 @@ func getBlockTemplate() (*BlockTemplate, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
 		return nil, err
 	}
-	// fmt.Printf("Actual Error : %+v",rpcResp.Error)
 	if rpcResp.Error != nil {
 		fmt.Printf("ERORROR : %+v", rpcResp.Error)
 		return nil, errors.New("RPC error in getBlockTemplate")
 	}
-	// fmt.Println(rpcResp.Result)
 	return &rpcResp.Result, nil
 }
-
-// Client 定义客户端结构体
-type Client struct {
-	conn          net.Conn
-	authorized    bool
-	subscribed    bool
-	mu            sync.Mutex
-	id            uint64
-	disCh         chan struct{}
-	shareCount    uint64
-	testTarget    string
-	shareTarget   string
-	currentHeader string
-}
-
-var headerMap = struct {
-	sync.RWMutex
-	m map[string]string
-}{m: make(map[string]string)}
 
 var magicNum = "2211"
 
 func CompactToBig(compact uint32) *big.Int {
-	// Extract the mantissa, sign bit, and exponent.
+
 	mantissa := compact & 0x007fffff
 	isNegative := compact&0x00800000 != 0
 	exponent := uint(compact >> 24)
 
-	// Since the base for the exponent is 256, the exponent can be treated
-	// as the number of bytes to represent the full 256-bit number.  So,
-	// treat the exponent as the number of bytes and shift the mantissa
-	// right or left accordingly.  This is equivalent to:
-	// N = mantissa * 256^(exponent-3)
 	var bn *big.Int
 	if exponent <= 3 {
 		mantissa >>= 8 * (3 - exponent)
@@ -144,7 +133,6 @@ func CompactToBig(compact uint32) *big.Int {
 		bn.Lsh(bn, 8*(exponent-3))
 	}
 
-	// Make it negative if the sign bit is set.
 	if isNegative {
 		bn = bn.Neg(bn)
 	}
@@ -152,40 +140,28 @@ func CompactToBig(compact uint32) *big.Int {
 	return bn
 }
 
-// 发送 mining.notify 消息
-func sendNotifyMessage(client *Client) error {
-	// fmt.Printf("\n\nSending notification called for jobId %v\n\n",client.id)
-	if !client.subscribed || !client.authorized {
-		return nil
-	}
-	// task := str + testTask
-	// fmt.Println(task)
-	tpl, err := getBlockTemplate()
-	// fmt.Printf("tpl is ===> %+v",tpl)
-	// fmt.Printf("template is ===> %+v\n",tpl)
-	if err != nil {
-		log.Printf("Error fetching blocktemplate: %v", err)
-		return err
-	}
+func buildJob(tpl *BlockTemplate, id uint64) (*Job, error) {
 	header := make([]byte, 144)
 	off := 0
 	binary.LittleEndian.PutUint32(header[off:], uint32(tpl.Version))
 	off += 4
 
-	parent, _ := hex.DecodeString(strings.TrimPrefix(tpl.PreviousHash, "0x"))
-	copy(header[off:], parent)
+	prev, err := hex.DecodeString(strings.TrimPrefix(tpl.PreviousHash, "0x"))
+	if err != nil || len(prev) != 32 {
+		return nil, fmt.Errorf("invalid previous hash length")
+	}
+	copy(header[off:], prev)
 	off += 32
 
-	txroot, _ := hex.DecodeString(strings.TrimPrefix(tpl.TxRoot, "0x"))
-	copy(header[off:], txroot)
+	txRoot, _ := hex.DecodeString(strings.TrimPrefix(tpl.TxRoot, "0x"))
+	copy(header[off:], txRoot)
 	off += 32
 
-	stateroot, _ := hex.DecodeString(strings.TrimPrefix(tpl.StateRoot, "0x"))
-	copy(header[off:], stateroot)
+	stateRoot, _ := hex.DecodeString(strings.TrimPrefix(tpl.StateRoot, "0x"))
+	copy(header[off:], stateRoot)
 	off += 32
 
 	nbits, _ := strconv.ParseUint(tpl.PoWDiffReference.Nbits, 16, 32)
-
 	binary.LittleEndian.PutUint32(header[off:], uint32(nbits))
 	off += 4
 
@@ -194,100 +170,45 @@ func sendNotifyMessage(client *Client) error {
 	binary.LittleEndian.PutUint64(header[off:], uint64(tpl.Height))
 	off += 8
 
-	cbAddr, _ := hex.DecodeString(strings.TrimPrefix(tpl.CoinbaseAddress, "0x"))
-	copy(header[off:], cbAddr)
+	coinbase, _ := hex.DecodeString(strings.TrimPrefix(tpl.CoinbaseAddress, "0x"))
+	copy(header[off:], coinbase)
 	off += 20
-
 	binary.LittleEndian.PutUint64(header[off:], tpl.Reward)
 	off += 8
 
-	if off != 144 {
-		log.Printf("Warning: header size %d != 144", off)
-	}
-	emptyBytes := []byte{9, 0, 0, 0, 0, 0}
-
-	header = append(header, emptyBytes...)
-
+	header = append(header, []byte{9, 0, 0, 0, 0, 0}...)
 	headerHex := hex.EncodeToString(header)
-	client.id += 1
-	task := headerHex
-	str := fmt.Sprintf("%012x", client.id)
-	headerMap.Lock()
-	headerMap.m[str] = headerHex
-	headerMap.Unlock()
-	client.mu.Lock()
-	client.currentHeader = headerHex
-	client.mu.Unlock()
-	fmt.Printf("Sending template ==> \n")
+
 	comBits := CompactToBig(uint32(nbits)).Text(16)
 	target := fmt.Sprintf("%64s", comBits)
 	target = strings.ReplaceAll(target, " ", "0")
-	fmt.Printf("target %v\n ", target)
 
-	//NEED TO BE TESTED
 	comBitsShare := new(big.Int).Mul(CompactToBig(uint32(nbits)), big.NewInt(int64(shareFactor))).Text(16)
 	sharetarget := fmt.Sprintf("%64s", comBitsShare)
 	sharetarget = strings.ReplaceAll(sharetarget, " ", "0")
-	fmt.Printf("share target %v\n ", sharetarget)
-	//END OF TESTING
 
-	client.testTarget = target
-	client.shareTarget = sharetarget
-	sendSetTargetMessage(client, client.shareTarget)
-
-	msg := StratumMessage{
-		ID:     nil,
-		Method: "mining.notify",
-		Params: []interface{}{
-			strconv.FormatUint(client.id, 10),
-			task,
-			true,
-		},
-	}
-
-	msgJSON, err := json.Marshal(msg)
-	if err != nil {
-		log.Printf("Error marshaling mining.notify message: %v", err)
-		return err
-	}
-	msgJSON = append(msgJSON, '\n')
-	_, err = client.conn.Write(msgJSON)
-	if err != nil {
-		log.Printf("Error sending mining.notify message: %v", err)
-		return err
-	}
-	// blockMu.Lock()
-	// blockmined = false
-	// blockMu.Unlock()
-	return nil
+	return &Job{ID: id, HeaderHex: headerHex, Target: target, ShareTarget: sharetarget, CreatedAt: time.Now()}, nil
 }
 
-// 处理客户端连接
 func handleConnection(conn net.Conn) {
 	fmt.Println("YES, new client connected")
 	client := &Client{
-		conn:        conn,
-		authorized:  false,
-		subscribed:  false,
-		id:          0,
-		disCh:       make(chan struct{}),
-		shareCount:  0,
-		testTarget:  "",
-		shareTarget: "",
+		conn:       conn,
+		authorized: false,
+		subscribed: false,
+		shareCount: 0,
 	}
-	poolMu.Lock()
-	poolClients[client] = struct{}{}
-	poolMu.Unlock()
+	clientsMu.Lock()
+	clients[client] = struct{}{}
+	clientsMu.Unlock()
 
 	defer func() {
-		poolMu.Lock()
-		delete(poolClients, client)
-		poolMu.Unlock()
-		close(client.disCh)
+		clientsMu.Lock()
+		delete(clients, client)
+		clientsMu.Unlock()
 		conn.Close()
 	}()
 
-	// buf := make([]byte, 4096)
 	reader := bufio.NewReader(conn)
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -296,17 +217,14 @@ func handleConnection(conn net.Conn) {
 			return
 		}
 
-		// Trim whitespace/newlines
 		trimmed := bytes.TrimSpace(line)
 		if len(trimmed) == 0 {
 			continue
 		}
 
-		// Unmarshal exactly one JSON object
 		var msg StratumMessage
 		if err := json.Unmarshal(trimmed, &msg); err != nil {
 			log.Printf("Error unmarshaling JSON: %v", err)
-			// send JSON-RPC parse error (id=nil)
 			sendErrorResponse(conn, nil, -32700, "Parse error")
 			continue
 		}
@@ -318,9 +236,6 @@ func handleConnection(conn net.Conn) {
 			handleSubscribe(client, msg.ID)
 		case "mining.authorize":
 			handleAuthorize(client, msg.ID, msg.Params)
-			if client.subscribed && client.authorized {
-				startTemplateWatcher(client, 100*time.Millisecond)
-			}
 		case "mining.submit":
 			handleSubmit(client, msg.ID, msg.Params)
 		default:
@@ -329,62 +244,89 @@ func handleConnection(conn net.Conn) {
 	}
 }
 
-func startTemplateWatcher(client *Client, interval time.Duration) {
-	var lastTemplateHash string
-
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-client.disCh:
-				return
-			case <-ticker.C:
-				tpl, err := getBlockTemplate()
-				if err != nil {
-					log.Printf("Watcher: failed to fetch template: %v", err)
-					continue
-				}
-
-				// Compose a hash/fingerprint of the block template
-				templateHash := fmt.Sprintf("%s-%d-%s", tpl.PreviousHash, tpl.CurTime, tpl.TxRoot)
-
-				// If template is new, notify miner
-				if templateHash != lastTemplateHash {
-					log.Println("Watcher: new template detected, sending mining.notify...")
-					err := sendNotifyMessage(client)
-					if err != nil {
-						log.Printf("Watcher: failed to send notify: %v", err)
-					}
-					lastTemplateHash = templateHash
-				}
-			}
-		}
-	}()
-}
-
-func sendSetTargetMessage(client *Client, target string) {
-	msg := StratumMessage{
+func broadcastNotify(job *Job) {
+	targetMsg := StratumMessage{
 		ID:     nil,
 		Method: "mining.set_target",
-		Params: []interface{}{target},
+		Params: []interface{}{job.ShareTarget},
 	}
-
-	msgJSON, err := json.Marshal(msg)
-	if err != nil {
-		log.Printf("Error marshaling mining.set_target message: %v", err)
-		return
+	notifyMsg := StratumMessage{
+		ID:     nil,
+		Method: "mining.notify",
+		Params: []interface{}{
+			strconv.FormatUint(job.ID, 10),
+			job.HeaderHex,
+			true,
+		},
 	}
+	bSet, _ := json.Marshal(targetMsg)
+	bNotify, _ := json.Marshal(notifyMsg)
 
-	msgJSON = append(msgJSON, '\n')
-	_, err = client.conn.Write(msgJSON)
-	if err != nil {
-		log.Printf("Error sending mining.set_target message: %v", err)
+	clientsMu.RLock()
+	clientsList := make([]*Client, 0, len(clients))
+	for c := range clients {
+		clientsList = append(clientsList, c)
+	}
+	clientsMu.RUnlock()
+	var wg sync.WaitGroup
+	wg.Add(len(clientsList))
+
+	for _, c := range clientsList {
+		go func(c *Client) {
+			defer wg.Done()
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if !c.subscribed || !c.authorized {
+				return
+			}
+			c.currentJob = job
+			// send set_target
+			c.conn.Write(append(bSet, '\n'))
+			// send notify
+			c.conn.Write(append(bNotify, '\n'))
+		}(c)
+	}
+	wg.Wait()
+}
+
+type templateFetcher struct{}
+
+func (t *templateFetcher) Start() {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	var nextID uint64
+	for range ticker.C {
+		tpl, err := getBlockTemplate()
+		if err != nil {
+			log.Printf("template fetch error: %v", err)
+			continue
+		}
+
+		// compare
+		jobMu.RLock()
+		prev := currentJob
+		jobMu.RUnlock()
+
+		job, err := buildJob(tpl, nextID)
+		if err != nil {
+			log.Printf("build job error: %v", err)
+			continue
+		}
+
+		if prev == nil || job.HeaderHex != prev.HeaderHex {
+			nextID++
+			job.ID = nextID
+			jobMu.Lock()
+			lastJob = prev
+			lastJobTs = time.Now()
+			currentJob = job
+			jobMu.Unlock()
+			log.Println("new job -> broadcasting to miners")
+			broadcastNotify(job)
+		}
 	}
 }
 
-// 处理订阅消息
 func handleSubscribe(client *Client, id interface{}) {
 	client.mu.Lock()
 	client.subscribed = true
@@ -400,7 +342,6 @@ func handleSubscribe(client *Client, id interface{}) {
 	sendResponse(client.conn, response)
 }
 
-// 处理授权消息
 func handleAuthorize(client *Client, id interface{}, params []interface{}) {
 	if len(params) < 2 {
 		sendErrorResponse(client.conn, id, -32602, "Invalid params")
@@ -414,7 +355,6 @@ func handleAuthorize(client *Client, id interface{}, params []interface{}) {
 		return
 	}
 
-	// 简单模拟授权逻辑
 	if username == "testuser" && password == "testuser" {
 		client.mu.Lock()
 		client.authorized = true
@@ -469,7 +409,6 @@ func submitBlockHeader(fullHeaderHex string, extraNonce2 uint64) (interface{}, e
 	return rpcResp.Result, nil
 }
 
-// 处理提交消息
 func handleSubmit(client *Client, id interface{}, params []interface{}) {
 	if !client.subscribed || !client.authorized {
 		sendErrorResponse(client.conn, id, -32000, "Not subscribed or authorized")
@@ -477,11 +416,18 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 	}
 
 	if len(params) < 3 {
-		sendErrorResponse(client.conn, id, -32602, "Invalid params")
+		sendErrorResponse(client.conn, id, -32006, "Invalid params")
 		return
 	}
 
-	// 简单模拟提交处理
+	jobMu.RLock()
+	job := currentJob
+	jobMu.RUnlock()
+	if job == nil {
+		sendErrorResponse(client.conn, id, -32004, "No template yet")
+		return
+	}
+
 	log.Printf("Received share submission: %+v", params)
 	username, _ := params[0].(string)
 	jobid, _ := params[1].(string)
@@ -495,24 +441,19 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 		return
 	}
 
-	decimalUint, err := strconv.ParseUint(jobid, 10, 64)
-	if err != nil {
-		fmt.Printf("str to int failed %v\n", err)
-	}
-	str := fmt.Sprintf("%012x", decimalUint)
-	headerMap.RLock()
-	task, ok := headerMap.m[str]
-	headerMap.RUnlock()
-	if !ok {
-		sendErrorResponse(client.conn, id, -32003, "Unknown jobid")
-		return
-	}
+	task := job.HeaderHex
+	Id := job.ID
 	client.mu.Lock()
-	isCurrent := (task == client.currentHeader)
+	isCurrent := (strconv.FormatUint(Id, 10) == jobid)
 	client.mu.Unlock()
 	if !isCurrent {
-		sendErrorResponse(client.conn, id, -32005, "Stale template")
-		return
+		if lastJob != nil && jobid == strconv.FormatUint(lastJob.ID, 10) &&
+			time.Since(lastJobTs) <= 400*time.Millisecond {
+			job = lastJob
+		} else {
+			sendErrorResponse(client.conn, id, -32005, "Stale template")
+			return
+		}
 	}
 	hexString := task
 	hexString += nonce
@@ -545,7 +486,7 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 	_, success := hashoutNum.SetString(resultHex, 16)
 	if success {
 		shareNum := new(big.Int)
-		_, success2 := shareNum.SetString(client.shareTarget, 16)
+		_, success2 := shareNum.SetString(job.ShareTarget, 16)
 		if success2 {
 			res2 := hashoutNum.Cmp(shareNum)
 			if res2 < 0 {
@@ -554,7 +495,7 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 				client.mu.Unlock()
 				//valid share
 				targetNum := new(big.Int)
-				_, success3 := targetNum.SetString(client.testTarget, 16)
+				_, success3 := targetNum.SetString(job.Target, 16)
 				if success3 {
 					res := hashoutNum.Cmp(targetNum)
 					if res < 0 {
@@ -580,9 +521,7 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 
 	if respRes {
 		fmt.Println("YES, valid share found, submitting block header...")
-		headerMap.RLock()
-		headerHex, _ := headerMap.m[str]
-		headerMap.RUnlock()
+		headerHex := job.HeaderHex
 		extraHex := "090000000000"
 		fullHeaderHex := headerHex[:144*2] + extraHex + nonce + magicNum
 
@@ -591,7 +530,7 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 		// 4) fire off RPC
 		result, _ := submitBlockHeader(fullHeaderHex, extra2Num)
 
-		log.Printf("▶ submitted block header, %+v node replied: %+v", client.id, result)
+		log.Printf("▶ submitted block header, %+v node replied: %+v", job.ID, result)
 	}
 
 	sendResponse(client.conn, StratumResponse{
@@ -602,7 +541,6 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 	fmt.Println("#########################################################################################################")
 }
 
-// 发送响应消息
 func sendResponse(conn net.Conn, response StratumResponse) {
 	log.Printf("sendResponse: %+v", response)
 	respJSON, err := json.Marshal(response)
@@ -617,7 +555,6 @@ func sendResponse(conn net.Conn, response StratumResponse) {
 	}
 }
 
-// 发送错误响应消息
 func sendErrorResponse(conn net.Conn, id interface{}, code int, message string) {
 	response := StratumResponse{
 		ID:     id,
@@ -628,7 +565,8 @@ func sendErrorResponse(conn net.Conn, id interface{}, code int, message string) 
 }
 
 func main() {
-	// 监听指定端口
+	go (&templateFetcher{}).Start()
+
 	listener, err := net.Listen("tcp", ":3336")
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
@@ -638,14 +576,12 @@ func main() {
 	fmt.Println("Stratum server is listening on port 3336")
 
 	for {
-		// 接受客户端连接
 		conn, err := listener.Accept()
 		if err != nil {
 			log.Printf("Error accepting connection: %v", err)
 			continue
 		}
 
-		// 处理客户端连接
 		go handleConnection(conn)
 	}
 }
