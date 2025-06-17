@@ -33,7 +33,7 @@ type StratumResponse struct {
 }
 
 var (
-	rpcURL      = "http://172.16.15.105:38131"
+	rpcURL      = "http://127.0.0.1:38131"
 	rpcUser     = "test"
 	rpcPassword = "test"
 
@@ -295,6 +295,7 @@ func (t *templateFetcher) Start() {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	var nextID uint64
+	var lastFP string
 	for range ticker.C {
 		tpl, err := getBlockTemplate()
 		if err != nil {
@@ -302,28 +303,33 @@ func (t *templateFetcher) Start() {
 			continue
 		}
 
-		// compare
-		jobMu.RLock()
-		prev := currentJob
-		jobMu.RUnlock()
+		fp := fmt.Sprintf(
+			"%s|%s|%s|%s|%d",
+			tpl.PreviousHash,
+			tpl.TxRoot,
+			tpl.StateRoot,
+			tpl.PoWDiffReference.Nbits,
+			tpl.Height,
+		)
 
+		if fp == lastFP {
+			continue
+		}
+		lastFP = fp
+		nextID++
 		job, err := buildJob(tpl, nextID)
 		if err != nil {
 			log.Printf("build job error: %v", err)
 			continue
 		}
 
-		if prev == nil || job.HeaderHex != prev.HeaderHex {
-			nextID++
-			job.ID = nextID
-			jobMu.Lock()
-			lastJob = prev
-			lastJobTs = time.Now()
-			currentJob = job
-			jobMu.Unlock()
-			log.Println("new job -> broadcasting to miners")
-			broadcastNotify(job)
-		}
+		jobMu.Lock()
+		lastJob = currentJob
+		lastJobTs = time.Now()
+		currentJob = job
+		jobMu.Unlock()
+		log.Printf("new job -> broadcasting to miners, cnt : %v", len(clients))
+		broadcastNotify(job)
 	}
 }
 
