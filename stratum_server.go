@@ -292,7 +292,7 @@ func broadcastNotify(job *Job) {
 type templateFetcher struct{}
 
 func (t *templateFetcher) Start() {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(300 * time.Millisecond)
 	defer ticker.Stop()
 	var nextID uint64
 	var lastFP string
@@ -484,8 +484,9 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 	client.mu.Unlock()
 	if !isCurrent {
 		if lastJob != nil && jobid == strconv.FormatUint(lastJob.ID, 10) &&
-			time.Since(lastJobTs) <= 400*time.Millisecond {
+			time.Since(lastJobTs) <= 300*time.Millisecond {
 			job = lastJob
+			task = job.HeaderHex
 		} else {
 			sendErrorResponse(client.conn, id, -32005, "Stale template")
 			return
@@ -603,13 +604,13 @@ func sendErrorResponse(conn net.Conn, id interface{}, code int, message string) 
 func main() {
 	go (&templateFetcher{}).Start()
 
-	listener, err := net.Listen("tcp", ":3334")
+	listener, err := net.Listen("tcp", ":3333")
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 	defer listener.Close()
 
-	fmt.Println("Stratum server is listening on port 3334")
+	fmt.Println("Stratum server is listening on port 3333")
 
 	for {
 		conn, err := listener.Accept()
