@@ -18,7 +18,7 @@ import (
 	"encoding/hex"
 	"math/big"
 
-	"golang.org/x/crypto/blake2sext"
+	blake2sext "github.com/ajaysaini717/myalgo"
 )
 
 type StratumMessage struct {
@@ -33,6 +33,7 @@ type StratumResponse struct {
 }
 
 var (
+	magicNum    = "2211"
 	rpcURL      = "http://127.0.0.1:38131"
 	rpcUser     = "test"
 	rpcPassword = "test"
@@ -73,12 +74,12 @@ type BlockTemplate struct {
 }
 
 type Client struct {
-	conn       net.Conn
-	authorized bool
-	subscribed bool
-	mu         sync.Mutex
-	shareCount uint64
-	currentJob *Job
+	conn        net.Conn
+	authorized  bool
+	subscribed  bool
+	mu          sync.Mutex
+	shareCounts map[uint64]uint64
+	currentJob  *Job
 }
 
 func getBlockTemplate() (*BlockTemplate, error) {
@@ -115,8 +116,6 @@ func getBlockTemplate() (*BlockTemplate, error) {
 	}
 	return &rpcResp.Result, nil
 }
-
-var magicNum = "2211"
 
 func CompactToBig(compact uint32) *big.Int {
 
@@ -193,10 +192,10 @@ func buildJob(tpl *BlockTemplate, id uint64) (*Job, error) {
 func handleConnection(conn net.Conn) {
 	fmt.Println("YES, new client connected")
 	client := &Client{
-		conn:       conn,
-		authorized: false,
-		subscribed: false,
-		shareCount: 0,
+		conn:        conn,
+		authorized:  false,
+		subscribed:  false,
+		shareCounts: make(map[uint64]uint64),
 	}
 	clientsMu.Lock()
 	clients[client] = struct{}{}
@@ -482,10 +481,14 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 	client.mu.Lock()
 	isCurrent := (strconv.FormatUint(Id, 10) == jobid)
 	client.mu.Unlock()
+	accetedTask := false
 	if !isCurrent {
 		if lastJob != nil && jobid == strconv.FormatUint(lastJob.ID, 10) &&
-			time.Since(lastJobTs) <= 400*time.Millisecond {
+			time.Since(lastJobTs) <= 150*time.Millisecond {
 			job = lastJob
+			task = job.HeaderHex
+			Id = job.ID
+			accetedTask = true
 		} else {
 			sendErrorResponse(client.conn, id, -32005, "Stale template")
 			return
@@ -527,7 +530,7 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 			res2 := hashoutNum.Cmp(shareNum)
 			if res2 < 0 {
 				client.mu.Lock()
-				client.shareCount += 1
+				client.shareCounts[job.ID] += 1
 				client.mu.Unlock()
 				//valid share
 				targetNum := new(big.Int)
@@ -555,7 +558,7 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 		fmt.Println("change hash result to big number failed please check the input string")
 	}
 
-	if respRes {
+	if respRes && !accetedTask {
 		fmt.Println("YES, valid share found, submitting block header...")
 		headerHex := job.HeaderHex
 		extraHex := "090000000000"
@@ -601,6 +604,17 @@ func sendErrorResponse(conn net.Conn, id interface{}, code int, message string) 
 }
 
 func main() {
+	http.Handle("/", http.FileServer(http.Dir("./static")))
+	http.HandleFunc("/api/signup", signupHandler)
+	http.HandleFunc("/api/login", loginHandler)
+	http.HandleFunc("/api/addMiner", addMinerHandler)
+	http.HandleFunc("/api/getMiner", getMinerHandler)
+
+	go func() {
+		fmt.Println("API server running on :8080")
+		log.Fatal(http.ListenAndServe(":8080", nil))
+	}()
+
 	go (&templateFetcher{}).Start()
 
 	listener, err := net.Listen("tcp", ":3334")

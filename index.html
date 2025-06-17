@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Mining Pool Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 500px; margin: 2em auto; padding: 1em; }
+    input, button { width: 100%; padding: 0.5em; margin: 0.5em 0; }
+    #after { display: none; }
+    #miner-info { margin-top: 1em; padding: 0.5em; border: 1px solid #ccc; }
+  </style>
+</head>
+<body>
+  <h2>Signup</h2>
+  <input id="su-user" placeholder="Username">
+  <input id="su-pass" placeholder="Password" type="password">
+  <button onclick="signup()">Signup</button>
+
+  <h2>Login</h2>
+  <input id="li-user" placeholder="Username">
+  <input id="li-pass" placeholder="Password" type="password">
+  <button onclick="login()">Login</button>
+
+  <div id="after">
+    <h2>Register Your Miner Address</h2>
+    <div id="miner-info"></div>
+
+    <div id="register-form">
+      <input id="pay-addr" placeholder="Payout Address">
+      <button onclick="addMiner()">Register Address</button>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = 'http://localhost:8080';
+    let token = '';
+
+    async function signup() {
+      const res = await fetch(`${API_BASE}/api/signup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          Username: document.getElementById('su-user').value,
+          Password: document.getElementById('su-pass').value
+        })
+      });
+      if (res.status === 201) alert('Signup successful');
+      else alert('Error: ' + await res.text());
+    }
+
+    async function login() {
+      const res = await fetch(`${API_BASE}/api/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          Username: document.getElementById('li-user').value,
+          Password: document.getElementById('li-pass').value
+        })
+      });
+      if (!res.ok) return alert('Login failed');
+      const { token: t } = await res.json();
+      token = t;
+      document.getElementById('after').style.display = 'block';
+      loadMiner();
+    }
+
+    async function loadMiner() {
+      const res = await fetch(`${API_BASE}/api/getMiner`, {
+        headers: { 'Authorization': 'Bearer ' + token }
+      });
+      if (!res.ok) {
+        document.getElementById('miner-info').textContent = 'No miner registered yet.';
+        return;
+      }
+      const { minerAddr } = await res.json();
+      if (minerAddr) {
+        document.getElementById('miner-info').innerHTML =
+          `<strong>Your Payout Address:</strong><br>${minerAddr}`;
+        document.getElementById('register-form').style.display = 'none';
+      } else {
+        document.getElementById('miner-info').textContent =
+          'You have not registered a miner address.';
+        document.getElementById('register-form').style.display = 'block';
+      }
+    }
+
+    async function addMiner() {
+      const body = { Address: document.getElementById('pay-addr').value };
+      const res = await fetch(`${API_BASE}/api/addMiner`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + token
+        },
+        body: JSON.stringify(body)
+      });
+      if (res.status === 204) {
+        alert('Miner address registered');
+        loadMiner();
+      } else {
+        alert('Error: ' + await res.text());
+      }
+    }
+  </script>
+</body>
+</html>
