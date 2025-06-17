@@ -370,6 +370,36 @@ func handleAuthorize(client *Client, id interface{}, params []interface{}) {
 			Result: true,
 			Error:  nil,
 		})
+		client.mu.Lock()
+		subscribed := client.subscribed
+		client.mu.Unlock()
+		if subscribed {
+			jobMu.RLock()
+			job := currentJob
+			jobMu.RUnlock()
+			if job != nil {
+				setMsg := StratumMessage{
+					ID:     nil,
+					Method: "mining.set_target",
+					Params: []interface{}{job.ShareTarget},
+				}
+				bSet, _ := json.Marshal(setMsg)
+				client.conn.Write(append(bSet, '\n'))
+
+				// send notify
+				notifyMsg := StratumMessage{
+					ID:     nil,
+					Method: "mining.notify",
+					Params: []interface{}{
+						strconv.FormatUint(job.ID, 10),
+						job.HeaderHex,
+						true,
+					},
+				}
+				bNotify, _ := json.Marshal(notifyMsg)
+				client.conn.Write(append(bNotify, '\n'))
+			}
+		}
 	} else {
 		sendResponse(client.conn, StratumResponse{
 			ID:     id,
@@ -573,13 +603,13 @@ func sendErrorResponse(conn net.Conn, id interface{}, code int, message string) 
 func main() {
 	go (&templateFetcher{}).Start()
 
-	listener, err := net.Listen("tcp", ":3336")
+	listener, err := net.Listen("tcp", ":3334")
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 	defer listener.Close()
 
-	fmt.Println("Stratum server is listening on port 3336")
+	fmt.Println("Stratum server is listening on port 3334")
 
 	for {
 		conn, err := listener.Accept()
