@@ -46,6 +46,7 @@ var (
 	currentJob  *Job
 	lastJob     *Job
 	lastJobTs   time.Time
+	poolFeePct  = 5 // 5% pool fee
 )
 
 type Job struct {
@@ -54,6 +55,7 @@ type Job struct {
 	Target      string
 	ShareTarget string
 	CreatedAt   time.Time
+	Reward      uint64
 }
 
 type BlockTemplate struct {
@@ -186,7 +188,7 @@ func buildJob(tpl *BlockTemplate, id uint64) (*Job, error) {
 	sharetarget := fmt.Sprintf("%64s", comBitsShare)
 	sharetarget = strings.ReplaceAll(sharetarget, " ", "0")
 
-	return &Job{ID: id, HeaderHex: headerHex, Target: target, ShareTarget: sharetarget, CreatedAt: time.Now()}, nil
+	return &Job{ID: id, HeaderHex: headerHex, Target: target, ShareTarget: sharetarget, CreatedAt: time.Now(), Reward: tpl.Reward}, nil
 }
 
 func handleConnection(conn net.Conn) {
@@ -359,52 +361,65 @@ func handleAuthorize(client *Client, id interface{}, params []interface{}) {
 		sendErrorResponse(client.conn, id, -32602, "Invalid params")
 		return
 	}
+	usersMu.Lock()
+	u, o := users[username]
+	if !o || u.Password != password {
+		sendErrorResponse(
+			client.conn,
+			id,
+			-32007,
+			"Invalid username or password",
+		)
+		return
+	}
+	if u.MinerAddr == "" {
+		sendErrorResponse(
+			client.conn,
+			id,
+			-32008,
+			"Miner address not set",
+		)
+		return
+	}
+	usersMu.Unlock()
 
-	if username == "testuser" && password == "testuser" {
-		client.mu.Lock()
-		client.authorized = true
-		client.mu.Unlock()
-		sendResponse(client.conn, StratumResponse{
-			ID:     id,
-			Result: true,
-			Error:  nil,
-		})
-		client.mu.Lock()
-		subscribed := client.subscribed
-		client.mu.Unlock()
-		if subscribed {
-			jobMu.RLock()
-			job := currentJob
-			jobMu.RUnlock()
-			if job != nil {
-				setMsg := StratumMessage{
-					ID:     nil,
-					Method: "mining.set_target",
-					Params: []interface{}{job.ShareTarget},
-				}
-				bSet, _ := json.Marshal(setMsg)
-				client.conn.Write(append(bSet, '\n'))
-
-				// send notify
-				notifyMsg := StratumMessage{
-					ID:     nil,
-					Method: "mining.notify",
-					Params: []interface{}{
-						strconv.FormatUint(job.ID, 10),
-						job.HeaderHex,
-						true,
-					},
-				}
-				bNotify, _ := json.Marshal(notifyMsg)
-				client.conn.Write(append(bNotify, '\n'))
+	client.mu.Lock()
+	client.authorized = true
+	client.mu.Unlock()
+	sendResponse(client.conn, StratumResponse{
+		ID:     id,
+		Result: true,
+		Error:  nil,
+	})
+	client.mu.Lock()
+	subscribed := client.subscribed
+	client.mu.Unlock()
+	if subscribed {
+		jobMu.RLock()
+		job := currentJob
+		jobMu.RUnlock()
+		if job != nil {
+			setMsg := StratumMessage{
+				ID:     nil,
+				Method: "mining.set_target",
+				Params: []interface{}{job.ShareTarget},
 			}
+			bSet, _ := json.Marshal(setMsg)
+			client.conn.Write(append(bSet, '\n'))
+
+			// send notify
+			notifyMsg := StratumMessage{
+				ID:     nil,
+				Method: "mining.notify",
+				Params: []interface{}{
+					strconv.FormatUint(job.ID, 10),
+					job.HeaderHex,
+					true,
+				},
+			}
+			bNotify, _ := json.Marshal(notifyMsg)
+			client.conn.Write(append(bNotify, '\n'))
 		}
-	} else {
-		sendResponse(client.conn, StratumResponse{
-			ID:     id,
-			Result: false,
-			Error:  nil,
-		})
 	}
 }
 
@@ -444,6 +459,28 @@ func submitBlockHeader(fullHeaderHex string, extraNonce2 uint64) (interface{}, e
 	return rpcResp.Result, nil
 }
 
+func distributeRewards(job *Job) {
+	clientsMu.RLock()
+	defer clientsMu.RUnlock()
+	net := float64(job.Reward) * (1.0 - float64(poolFeePct)/100.0)
+	var totalShares uint64
+	for c := range clients {
+		c.mu.Lock()
+		totalShares += c.shareCounts[job.ID]
+		c.mu.Unlock()
+	}
+
+	for c := range clients {
+		c.mu.Lock()
+		shares := c.shareCounts[job.ID]
+		c.mu.Unlock()
+
+		payout := net * float64(shares) / float64(totalShares)
+		log.Printf("Payout %.8f to %s (shares %d/%d)\n",
+			payout, c.conn.RemoteAddr(), shares, totalShares)
+	}
+}
+
 func handleSubmit(client *Client, id interface{}, params []interface{}) {
 	if !client.subscribed || !client.authorized {
 		sendErrorResponse(client.conn, id, -32000, "Not subscribed or authorized")
@@ -472,7 +509,7 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 	// new a BLAKE2s hash
 	hash1, err := blake2sext.New256(nil)
 	if err != nil {
-		sendErrorResponse(client.conn, id, -32001, "something error happen in server")
+		sendErrorResponse(client.conn, id, -32001, "hash error happen in server")
 		return
 	}
 
@@ -564,12 +601,11 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 		extraHex := "090000000000"
 		fullHeaderHex := headerHex[:144*2] + extraHex + nonce + magicNum
 
-		// 3) parse the two numbers
 		extra2Num, _ := strconv.ParseUint(strings.TrimPrefix("0x00", "0x"), 16, 64)
-		// 4) fire off RPC
 		result, _ := submitBlockHeader(fullHeaderHex, extra2Num)
-
+		time.Sleep(150 * time.Millisecond)
 		log.Printf("▶ submitted block header, %+v node replied: %+v", job.ID, result)
+		distributeRewards(job)
 	}
 
 	sendResponse(client.conn, StratumResponse{
