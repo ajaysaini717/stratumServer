@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,10 @@ import (
 	"math/big"
 
 	blake2sext "github.com/ajaysaini717/myalgo"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethclient"
 )
 
 type StratumMessage struct {
@@ -35,8 +40,10 @@ type StratumResponse struct {
 var (
 	magicNum    = "2211"
 	rpcURL      = "http://127.0.0.1:38131"
+	evmURL      = "http://127.0.0.1:18545"
 	rpcUser     = "test"
 	rpcPassword = "test"
+	privKeyHex  = "e4843ef6113472221280f583526b6815df317cbe1ad7a03b32f60233aab96759"
 
 	clients   = make(map[*Client]struct{})
 	clientsMu sync.RWMutex
@@ -82,6 +89,7 @@ type Client struct {
 	mu          sync.Mutex
 	shareCounts map[uint64]uint64
 	currentJob  *Job
+	MinerAddr   string
 }
 
 func getBlockTemplate() (*BlockTemplate, error) {
@@ -385,6 +393,7 @@ func handleAuthorize(client *Client, id interface{}, params []interface{}) {
 
 	client.mu.Lock()
 	client.authorized = true
+	client.MinerAddr = u.MinerAddr
 	client.mu.Unlock()
 	sendResponse(client.conn, StratumResponse{
 		ID:     id,
@@ -459,6 +468,57 @@ func submitBlockHeader(fullHeaderHex string, extraNonce2 uint64) (interface{}, e
 	return rpcResp.Result, nil
 }
 
+func sendToAddressRPC(address string, amountEth float64) (string, error) {
+	client, err := ethclient.Dial(rpcURL)
+	if err != nil {
+		return "", fmt.Errorf("dial RPC: %w", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+
+	pkBytes, err := hex.DecodeString(privKeyHex)
+	if err != nil {
+		return "", fmt.Errorf("invalid privkey hex: %w", err)
+	}
+	privKey, err := crypto.ToECDSA(pkBytes)
+	if err != nil {
+		return "", fmt.Errorf("key parse: %w", err)
+	}
+	fromAddr := crypto.PubkeyToAddress(privKey.PublicKey)
+	log.Printf("From: %s\n", fromAddr.Hex())
+
+	nonce, err := client.PendingNonceAt(ctx, fromAddr)
+	if err != nil {
+		return "", fmt.Errorf("get nonce: %w", err)
+	}
+
+	wei := new(big.Int).Mul(big.NewInt(int64(amountEth*1e6)), big.NewInt(1e12))
+
+	gasPrice, err := client.SuggestGasPrice(ctx)
+	if err != nil {
+		return "", fmt.Errorf("suggest gas price: %w", err)
+	}
+
+	toAddr := common.HexToAddress(address)
+	tx := types.NewTransaction(nonce, toAddr, wei, 21000, gasPrice, nil)
+
+	chainID, err := client.NetworkID(ctx)
+	if err != nil {
+		return "", fmt.Errorf("chain ID: %w", err)
+	}
+	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainID), privKey)
+	if err != nil {
+		return "", fmt.Errorf("sign tx: %w", err)
+	}
+
+	if err := client.SendTransaction(ctx, signedTx); err != nil {
+		return "", fmt.Errorf("send tx: %w", err)
+	}
+
+	return signedTx.Hash().Hex(), nil
+}
+
 func distributeRewards(job *Job) {
 	clientsMu.RLock()
 	defer clientsMu.RUnlock()
@@ -471,13 +531,16 @@ func distributeRewards(job *Job) {
 	}
 
 	for c := range clients {
+		addr := ""
 		c.mu.Lock()
 		shares := c.shareCounts[job.ID]
+		addr = c.MinerAddr
 		c.mu.Unlock()
 
 		payout := net * float64(shares) / float64(totalShares)
 		log.Printf("Payout %.8f to %s (shares %d/%d)\n",
 			payout, c.conn.RemoteAddr(), shares, totalShares)
+		sendToAddressRPC(addr, payout)
 	}
 }
 
@@ -605,7 +668,7 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 		result, _ := submitBlockHeader(fullHeaderHex, extra2Num)
 		time.Sleep(150 * time.Millisecond)
 		log.Printf("▶ submitted block header, %+v node replied: %+v", job.ID, result)
-		distributeRewards(job)
+		go distributeRewards(job)
 	}
 
 	sendResponse(client.conn, StratumResponse{
