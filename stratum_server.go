@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -20,11 +21,18 @@ import (
 	"math/big"
 
 	blake2sext "github.com/ajaysaini717/myalgo"
+	ethereum "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 )
+
+type Payout struct {
+	JobID  uint64
+	Addr   string
+	Amount float64
+}
 
 type StratumMessage struct {
 	ID     interface{}   `json:"id"`
@@ -43,7 +51,7 @@ var (
 	evmURL      = "http://127.0.0.1:18545"
 	rpcUser     = "test"
 	rpcPassword = "test"
-	privKeyHex  = "e4843ef6113472221280f583526b6815df317cbe1ad7a03b32f60233aab96759"
+	privKeyHex  = "b54bd72f6cecd4811309608da20315b449b344db5faabe3b9de8e9f3bbde5267"
 
 	clients   = make(map[*Client]struct{})
 	clientsMu sync.RWMutex
@@ -54,7 +62,63 @@ var (
 	lastJob     *Job
 	lastJobTs   time.Time
 	poolFeePct  = 5 // 5% pool fee
+
+	ethClient  *ethclient.Client
+	senderKey  *ecdsa.PrivateKey
+	senderAddr common.Address
+
+	nextNonce   uint64
+	nonceMu     sync.Mutex
+	payoutQueue chan Payout
 )
+
+func init() {
+	var err error
+
+	// 1) Dial RPC once
+	ethClient, err = ethclient.Dial(evmURL)
+	if err != nil {
+		log.Fatalf("failed to connect to EVM RPC: %v", err)
+	}
+
+	// 2) Parse private key once
+	pkBytes, err := hex.DecodeString(privKeyHex)
+	if err != nil {
+		log.Fatalf("invalid privKeyHex: %v", err)
+	}
+	senderKey, err = crypto.ToECDSA(pkBytes)
+	if err != nil {
+		log.Fatalf("invalid ECDSA key: %v", err)
+	}
+	senderAddr = crypto.PubkeyToAddress(senderKey.PublicKey)
+	log.Printf("Payout sender address: %s", senderAddr.Hex())
+
+	// 3) Initialize nonce from pending
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	n, err := ethClient.PendingNonceAt(ctx, senderAddr)
+	if err != nil {
+		log.Fatalf("failed to fetch pending nonce: %v", err)
+	}
+	nonceMu.Lock()
+	nextNonce = n
+	nonceMu.Unlock()
+
+	// 4) Start single payout worker
+	payoutQueue = make(chan Payout, 4000)
+	go func() {
+		for task := range payoutQueue {
+			txid, err := sendToAddressRPC(task.Addr, task.Amount)
+			if err != nil {
+				log.Printf("❌ payout job %d to %s failed: %v",
+					task.JobID, task.Addr, err)
+			} else {
+				log.Printf("✅ payout job %d to %s (%.8f ETH) tx=%s",
+					task.JobID, task.Addr, task.Amount, txid)
+			}
+		}
+	}()
+}
 
 type Job struct {
 	ID          uint64
@@ -371,6 +435,7 @@ func handleAuthorize(client *Client, id interface{}, params []interface{}) {
 	}
 	usersMu.Lock()
 	u, o := users[username]
+	usersMu.Unlock()
 	if !o || u.Password != password {
 		sendErrorResponse(
 			client.conn,
@@ -389,7 +454,6 @@ func handleAuthorize(client *Client, id interface{}, params []interface{}) {
 		)
 		return
 	}
-	usersMu.Unlock()
 
 	client.mu.Lock()
 	client.authorized = true
@@ -467,62 +531,70 @@ func submitBlockHeader(fullHeaderHex string, extraNonce2 uint64) (interface{}, e
 
 	return rpcResp.Result, nil
 }
+func sendToAddressRPC(to string, amountEth float64) (string, error) {
+	// A) unique nonce
+	nonceMu.Lock()
+	n := nextNonce
+	nextNonce++
+	nonceMu.Unlock()
 
-func sendToAddressRPC(address string, amountEth float64) (string, error) {
-	client, err := ethclient.Dial(rpcURL)
-	if err != nil {
-		return "", fmt.Errorf("dial RPC: %w", err)
-	}
-	defer client.Close()
+	// B) build tx
+	wei := new(big.Int).Mul(
+		big.NewInt(int64(amountEth*1e6)), // amt*1e6
+		big.NewInt(1e12),                 // *1e12 = amt*1e18
+	)
+	toAddr := common.HexToAddress(to)
 
-	ctx := context.Background()
-
-	pkBytes, err := hex.DecodeString(privKeyHex)
-	if err != nil {
-		return "", fmt.Errorf("invalid privkey hex: %w", err)
-	}
-	privKey, err := crypto.ToECDSA(pkBytes)
-	if err != nil {
-		return "", fmt.Errorf("key parse: %w", err)
-	}
-	fromAddr := crypto.PubkeyToAddress(privKey.PublicKey)
-	log.Printf("From: %s\n", fromAddr.Hex())
-
-	nonce, err := client.PendingNonceAt(ctx, fromAddr)
-	if err != nil {
-		return "", fmt.Errorf("get nonce: %w", err)
-	}
-
-	wei := new(big.Int).Mul(big.NewInt(int64(amountEth*1e6)), big.NewInt(1e12))
-
-	gasPrice, err := client.SuggestGasPrice(ctx)
+	gasPrice, err := ethClient.SuggestGasPrice(context.Background())
 	if err != nil {
 		return "", fmt.Errorf("suggest gas price: %w", err)
 	}
+	tx := types.NewTransaction(n, toAddr, wei, 21000, gasPrice, nil)
 
-	toAddr := common.HexToAddress(address)
-	tx := types.NewTransaction(nonce, toAddr, wei, 21000, gasPrice, nil)
-
-	chainID, err := client.NetworkID(ctx)
+	// C) sign EIP-155
+	chainID, err := ethClient.NetworkID(context.Background())
 	if err != nil {
-		return "", fmt.Errorf("chain ID: %w", err)
+		return "", fmt.Errorf("fetch chain ID: %w", err)
 	}
-	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainID), privKey)
+	signed, err := types.SignTx(tx, types.NewEIP155Signer(chainID), senderKey)
 	if err != nil {
 		return "", fmt.Errorf("sign tx: %w", err)
 	}
 
-	if err := client.SendTransaction(ctx, signedTx); err != nil {
+	// D) broadcast
+	if err := ethClient.SendTransaction(context.Background(), signed); err != nil {
 		return "", fmt.Errorf("send tx: %w", err)
 	}
+	hash := signed.Hash().Hex()
+	log.Printf("▶ broadcasted tx %s; waiting…", hash)
 
-	return signedTx.Hash().Hex(), nil
+	// E) wait for mining
+	for {
+		receipt, err := ethClient.TransactionReceipt(context.Background(), signed.Hash())
+		if err != nil {
+			if err == ethereum.NotFound {
+				time.Sleep(300 * time.Millisecond)
+				continue
+			}
+			return "", fmt.Errorf("receipt error: %w", err)
+		}
+		if receipt.Status != 1 {
+			return "", fmt.Errorf("tx %s failed in block", hash)
+		}
+		break
+	}
+
+	log.Printf("✅ tx %s mined", hash)
+	return hash, nil
 }
 
 func distributeRewards(job *Job) {
 	clientsMu.RLock()
 	defer clientsMu.RUnlock()
-	net := float64(job.Reward) * (1.0 - float64(poolFeePct)/100.0)
+
+	totalEth := float64(job.Reward) / 1e9
+	netEth := totalEth * (1 - float64(poolFeePct)/100)
+
 	var totalShares uint64
 	for c := range clients {
 		c.mu.Lock()
@@ -531,16 +603,17 @@ func distributeRewards(job *Job) {
 	}
 
 	for c := range clients {
-		addr := ""
 		c.mu.Lock()
 		shares := c.shareCounts[job.ID]
-		addr = c.MinerAddr
+		addr := c.MinerAddr
 		c.mu.Unlock()
-
-		payout := net * float64(shares) / float64(totalShares)
-		log.Printf("Payout %.8f to %s (shares %d/%d)\n",
-			payout, c.conn.RemoteAddr(), shares, totalShares)
-		sendToAddressRPC(addr, payout)
+		if shares == 0 {
+			continue
+		}
+		amount := netEth * float64(shares) / float64(totalShares)
+		payoutQueue <- Payout{JobID: job.ID, Addr: addr, Amount: amount}
+		log.Printf("enqueued payout %.8f ETH to %s (shares %d/%d)",
+			amount, addr, shares, totalShares)
 	}
 }
 
