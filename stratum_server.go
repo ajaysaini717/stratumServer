@@ -61,7 +61,7 @@ var (
 	currentJob  *Job
 	lastJob     *Job
 	lastJobTs   time.Time
-	poolFeePct  = 5 // 5% pool fee
+	poolFeePct  = 5
 
 	ethClient  *ethclient.Client
 	senderKey  *ecdsa.PrivateKey
@@ -70,6 +70,9 @@ var (
 	nextNonce   uint64
 	nonceMu     sync.Mutex
 	payoutQueue chan Payout
+
+	acceptedTasks = make(map[uint64]struct{})
+	taskMu        sync.Mutex
 )
 
 func init() {
@@ -310,7 +313,7 @@ func handleConnection(conn net.Conn) {
 		case "mining.authorize":
 			handleAuthorize(client, msg.ID, msg.Params)
 		case "mining.submit":
-			handleSubmit(client, msg.ID, msg.Params)
+			go handleSubmit(client, msg.ID, msg.Params)
 		default:
 			sendErrorResponse(conn, msg.ID, -32601, "Method not found")
 		}
@@ -654,14 +657,12 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 	client.mu.Lock()
 	isCurrent := (strconv.FormatUint(Id, 10) == jobid)
 	client.mu.Unlock()
-	accetedTask := false
 	if !isCurrent {
 		if lastJob != nil && jobid == strconv.FormatUint(lastJob.ID, 10) &&
-			time.Since(lastJobTs) <= 150*time.Millisecond {
+			time.Since(lastJobTs) <= 300*time.Millisecond {
 			job = lastJob
 			task = job.HeaderHex
 			Id = job.ID
-			accetedTask = true
 		} else {
 			sendErrorResponse(client.conn, id, -32005, "Stale template")
 			return
@@ -731,17 +732,24 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 		fmt.Println("change hash result to big number failed please check the input string")
 	}
 
-	if respRes && !accetedTask {
+	if respRes {
 		fmt.Println("YES, valid share found, submitting block header...")
 		headerHex := job.HeaderHex
 		extraHex := "090000000000"
 		fullHeaderHex := headerHex[:144*2] + extraHex + nonce + magicNum
 
 		extra2Num, _ := strconv.ParseUint(strings.TrimPrefix("0x00", "0x"), 16, 64)
-		result, _ := submitBlockHeader(fullHeaderHex, extra2Num)
-		time.Sleep(150 * time.Millisecond)
-		log.Printf("▶ submitted block header, %+v node replied: %+v", job.ID, result)
-		go distributeRewards(job)
+		taskMu.Lock()
+		if _, done := acceptedTasks[job.ID]; !done {
+			acceptedTasks[job.ID] = struct{}{}
+			taskMu.Unlock()
+			result, _ := submitBlockHeader(fullHeaderHex, extra2Num)
+			time.Sleep(500 * time.Millisecond)
+			log.Printf("▶ submitted block header, %+v node replied: %+v", job.ID, result)
+			go distributeRewards(job)
+		} else {
+			taskMu.Unlock()
+		}
 	}
 
 	sendResponse(client.conn, StratumResponse{
