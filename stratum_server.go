@@ -26,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"golang.org/x/exp/rand"
 )
 
 type Payout struct {
@@ -46,12 +47,11 @@ type StratumResponse struct {
 }
 
 var (
-	magicNum    = "2211"
 	rpcURL      = "http://127.0.0.1:38131"
 	evmURL      = "http://127.0.0.1:18545"
 	rpcUser     = "test"
 	rpcPassword = "test"
-	privKeyHex  = "b54bd72f6cecd4811309608da20315b449b344db5faabe3b9de8e9f3bbde5267"
+	privKeyHex  = "7643869c91b95dd8fbdb94e219c291e9e6ea2417d5384978840afaeeb2148337"
 
 	clients   = make(map[*Client]struct{})
 	clientsMu sync.RWMutex
@@ -157,6 +157,7 @@ type Client struct {
 	shareCounts map[uint64]uint64
 	currentJob  *Job
 	MinerAddr   string
+	MagicNum    string
 }
 
 func getBlockTemplate() (*BlockTemplate, error) {
@@ -277,14 +278,12 @@ func handleConnection(conn net.Conn) {
 	clientsMu.Lock()
 	clients[client] = struct{}{}
 	clientsMu.Unlock()
-
 	defer func() {
 		clientsMu.Lock()
 		delete(clients, client)
 		clientsMu.Unlock()
 		conn.Close()
 	}()
-
 	reader := bufio.NewReader(conn)
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -409,20 +408,22 @@ func (t *templateFetcher) Start() {
 	}
 }
 
-func handleSubscribe(client *Client, id interface{}) {
-	client.mu.Lock()
-	client.subscribed = true
-	client.mu.Unlock()
-	response := StratumResponse{
-		ID: id,
-		Result: []interface{}{
-			nil, magicNum, 8,
-		},
-		Error: nil,
-	}
+	func handleSubscribe(client *Client, id interface{}) {
+		uniqueMagic := fmt.Sprintf("%d", rand.Intn(9000)+1000)
+		client.mu.Lock()
+		client.MagicNum = uniqueMagic
+		client.subscribed = true
+		client.mu.Unlock()
+		response := StratumResponse{
+			ID: id,
+			Result: []interface{}{
+				nil, uniqueMagic, 8,
+			},
+			Error: nil,
+		}
 
-	sendResponse(client.conn, response)
-}
+		sendResponse(client.conn, response)
+	}
 
 func handleAuthorize(client *Client, id interface{}, params []interface{}) {
 	if len(params) < 2 {
@@ -625,7 +626,7 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 		sendErrorResponse(client.conn, id, -32000, "Not subscribed or authorized")
 		return
 	}
-
+    
 	if len(params) < 3 {
 		sendErrorResponse(client.conn, id, -32006, "Invalid params")
 		return
@@ -643,7 +644,6 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 	username, _ := params[0].(string)
 	jobid, _ := params[1].(string)
 	nonce, _ := params[2].(string)
-	fmt.Printf("username %s jobid %s nonce %s\n", username, jobid, nonce)
 
 	// new a BLAKE2s hash
 	hash1, err := blake2sext.New256(nil)
@@ -655,6 +655,7 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 	task := job.HeaderHex
 	Id := job.ID
 	client.mu.Lock()
+	magicNum := client.MagicNum
 	isCurrent := (strconv.FormatUint(Id, 10) == jobid)
 	client.mu.Unlock()
 	if !isCurrent {
@@ -668,9 +669,9 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 			return
 		}
 	}
-	hexString := task
-	hexString += nonce
-	hexString += magicNum
+	hexString := task     // this is template
+	hexString += nonce    // this is nonce 
+	hexString += magicNum //this is random number
 	byteSlice, err := hex.DecodeString(hexString)
 	if err != nil {
 		sendErrorResponse(client.conn, id, -32002, "invalid format of nonce, not little endian 64 bit hex string")
@@ -737,7 +738,7 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 		headerHex := job.HeaderHex
 		extraHex := "090000000000"
 		fullHeaderHex := headerHex[:144*2] + extraHex + nonce + magicNum
-
+        
 		extra2Num, _ := strconv.ParseUint(strings.TrimPrefix("0x00", "0x"), 16, 64)
 		taskMu.Lock()
 		if _, done := acceptedTasks[job.ID]; !done {
@@ -751,7 +752,7 @@ func handleSubmit(client *Client, id interface{}, params []interface{}) {
 			taskMu.Unlock()
 		}
 	}
-
+    fmt.Printf("username %s jobid %s nonce %s magicNum %s\n", username, jobid, nonce, magicNum)
 	sendResponse(client.conn, StratumResponse{
 		ID:     id,
 		Result: respRes || validShare,
@@ -791,8 +792,8 @@ func main() {
 	http.HandleFunc("/api/getMiner", getMinerHandler)
 
 	go func() {
-		fmt.Println("API server running on :8080")
-		log.Fatal(http.ListenAndServe(":8080", nil))
+		fmt.Println("API server running on :8181")
+		log.Fatal(http.ListenAndServe(":8181", nil))
 	}()
 
 	go (&templateFetcher{}).Start()

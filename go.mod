@@ -6,6 +6,7 @@ require (
 	github.com/ajaysaini717/myalgo v1.0.1
 	github.com/ethereum/go-ethereum v1.15.11
 	github.com/golang-jwt/jwt/v4 v4.5.2
+	golang.org/x/exp v0.0.0-20230626212559-97b1e661b5df
 )
 
 require (
