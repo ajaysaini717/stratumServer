@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,11 +48,11 @@ type StratumResponse struct {
 }
 
 var (
-	rpcURL      = "http://127.0.0.1:38131"
-	evmURL      = "http://127.0.0.1:18545"
+	evmURL      = os.Getenv("EVM_URL")
+	rpcURL      = os.Getenv("RPC_URL")
+	privKeyHex  = os.Getenv("POOL_PRIVATE_KEY")
 	rpcUser     = "test"
 	rpcPassword = "test"
-	privKeyHex  = "7643869c91b95dd8fbdb94e219c291e9e6ea2417d5384978840afaeeb2148337"
 
 	clients   = make(map[*Client]struct{})
 	clientsMu sync.RWMutex
@@ -792,8 +793,8 @@ func main() {
 	http.HandleFunc("/api/getMiner", getMinerHandler)
 
 	go func() {
-		fmt.Println("API server running on :8181")
-		log.Fatal(http.ListenAndServe(":8181", nil))
+		fmt.Println("API server running on :8083")
+		log.Fatal(http.ListenAndServe(":8083", nil))
 	}()
 
 	go (&templateFetcher{}).Start()

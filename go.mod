@@ -1,4 +1,4 @@
-module stratumSever
+module stratumServer
 
 go 1.24.2
 
