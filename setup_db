@@ -1,0 +1,76 @@
+#!/bin/bash
+set -e
+
+# Load environment variables if .env exists
+if [ -f .env ]; then
+    # Filter out comments and empty lines
+    export $(grep -v '^#' .env | grep -v '^$' | xargs)
+fi
+
+# Use values from env or defaults
+PG_USER=${PG_USER:-postgres}
+PG_PASS=${PG_PASSWORD:-mysecretpassword}
+PG_DB=${PG_DB:-pool}
+PG_PORT=${PG_PORT:-5432}
+
+# Docker Container Names
+DB_CONTAINER="pool-db"
+GUI_CONTAINER="db-gui"
+
+echo "🚀 Starting Database Setup..."
+
+# 1. Start Postgres
+if [ ! "$(docker ps -q -f name=$DB_CONTAINER)" ]; then
+    if [ "$(docker ps -aq -f name=$DB_CONTAINER)" ]; then
+        echo "Removing existing stopped container $DB_CONTAINER..."
+        docker rm $DB_CONTAINER
+    fi
+    echo "Starting PostgreSQL container ($DB_CONTAINER)..."
+    docker run -d \
+      --name $DB_CONTAINER \
+      -e POSTGRES_USER=$PG_USER \
+      -e POSTGRES_PASSWORD=$PG_PASS \
+      -e POSTGRES_DB=$PG_DB \
+      -p $PG_PORT:5432 \
+      postgres:15-alpine
+else
+    echo "✅ $DB_CONTAINER is already running."
+fi
+
+# 2. Start Adminer
+if [ ! "$(docker ps -q -f name=$GUI_CONTAINER)" ]; then
+    if [ "$(docker ps -aq -f name=$GUI_CONTAINER)" ]; then
+        echo "Removing existing stopped container $GUI_CONTAINER..."
+        docker rm $GUI_CONTAINER
+    fi
+    echo "Starting Adminer container ($GUI_CONTAINER)..."
+    docker run -d \
+      --name $GUI_CONTAINER \
+      --link $DB_CONTAINER:db \
+      -p 8080:8080 \
+      adminer
+else
+    echo "✅ $GUI_CONTAINER is already running."
+fi
+
+# 3. Wait for Postgres
+echo "Waiting for PostgreSQL to be ready..."
+until docker exec $DB_CONTAINER pg_isready -U $PG_USER > /dev/null 2>&1; do
+  sleep 1
+done
+
+# 4. Apply Schema
+echo "Applying database schema..."
+docker cp schema.sql $DB_CONTAINER:/schema.sql
+docker exec -i $DB_CONTAINER psql -U $PG_USER -d $PG_DB -f /schema.sql
+
+echo "✅ Setup Complete!"
+echo "---------------------------------------------------"
+echo "Database: postgres://$PG_USER:******@localhost:$PG_PORT/$PG_DB"
+echo "Adminer UI: http://localhost:8080"
+echo "  - System: PostgreSQL"
+echo "  - Server: $DB_CONTAINER"
+echo "  - Username: $PG_USER"
+echo "  - Password: $PG_PASS"
+echo "  - Database: $PG_DB"
+echo "---------------------------------------------------"
