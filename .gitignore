@@ -1,0 +1,7 @@
+*.sh
+Dockerfile
+bin/
+.vscode/
+*__debug_*
+scripts/
+.env

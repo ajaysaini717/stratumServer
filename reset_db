@@ -1,0 +1,30 @@
+#!/bin/bash
+set -e
+
+# Load environment variables if .env exists
+if [ -f .env ]; then
+    # Filter out comments and empty lines
+    export $(grep -v '^#' .env | grep -v '^$' | xargs)
+fi
+
+# Use values from env or defaults
+PG_USER=${PG_USER:-postgres}
+PG_DB=${PG_DB:-pool}
+CONTAINER_NAME="pool-db"
+
+echo "⚠️  WARNING: This will delete ALL data from the mining pool database."
+echo "Tables to be truncated: blocks, credits, miners, payouts, log_rotations"
+echo "Sleeping 5 seconds... Press Ctrl+C to cancel."
+sleep 5
+
+echo "Stopping pool if running..."
+# Attempt to stop the pool binary if it's running (best effort)
+pkill -f "bin/pool" || true
+
+echo "Clearing database..."
+
+docker exec -i $CONTAINER_NAME psql -U $PG_USER -d $PG_DB <<EOF
+TRUNCATE TABLE credits, payouts, blocks, miners, log_rotations RESTART IDENTITY CASCADE;
+EOF
+
+echo "✅ Database cleared successfully."

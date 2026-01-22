@@ -1,0 +1,65 @@
+services:
+  asic-pool:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: asic-pool
+    container_name: asic-pool
+    restart: unless-stopped
+    
+    # Use host network for easy access to both devnet nodes and local postgres
+    network_mode: host
+    
+    environment:
+      # Stratum Server
+      POOL_PORT: ${POOL_PORT:-3334}
+      
+      # Node RPC (DAG) - connects to asic-0 on the devnet
+      NODE_RPC_URL: ${NODE_RPC_URL:-http://192.168.202.2:2001}
+      NODE_RPC_USER: ${NODE_RPC_USER:-test}
+      NODE_RPC_PASS: ${NODE_RPC_PASS:-test}
+      
+      # Wallet RPC (EVM) - for payouts
+      WALLET_RPC_URL: ${WALLET_RPC_URL:-http://192.168.202.2:2002}
+      
+      # PPLNS Configuration
+      PPLNS_N_WORK: ${PPLNS_N_WORK:-1000}
+      
+      # Maturity Configuration
+      POOL_BLOCK_MATURITY: ${POOL_BLOCK_MATURITY:-10}
+      POOL_PAYOUT_MATURITY: ${POOL_PAYOUT_MATURITY:-50}
+      POOL_FEE_PERCENTAGE: ${POOL_FEE_PERCENTAGE:-2.0}
+      
+      # Database
+      PG_URL: ${PG_URL:-postgres://test:test@127.0.0.1:5432/pool}
+      
+      # Wallet Private Key (for payouts)
+      POOL_PRIVATE_KEY: ${POOL_PRIVATE_KEY:-}
+      TZ: Asia/Kolkata
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: Include the pool database if not running separately
+  pool-db:
+    image: postgres:15-alpine
+    container_name: pool-db
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: pool
+      TZ: Asia/Kolkata
+    volumes:
+      - pool-db-data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    profiles:
+      - with-db
+
+volumes:
+  pool-db-data:
