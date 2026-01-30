@@ -213,8 +213,8 @@ func Run(cfg Config) error {
 	// Initialize IPFS Logger
 	var ipfsLog *logger.IPFSLogger
 	if cfg.IPFSNodeURL != "" {
-		ipfsLog = logger.NewIPFSLogger(cfg.IPFSNodeURL)
-		log.Printf("✅ IPFS Logger Initialized (Node: %s)", cfg.IPFSNodeURL)
+		ipfsLog = logger.NewIPFSLogger(cfg.IPFSNodeURL, "logs")
+		log.Printf("✅ IPFS Logger Initialized (Node: %s, Dir: logs)", cfg.IPFSNodeURL)
 	}
 
 	// Initialize Wallet Client

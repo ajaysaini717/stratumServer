@@ -5,3 +5,4 @@ bin/
 *__debug_*
 scripts/
 .env
+.logs

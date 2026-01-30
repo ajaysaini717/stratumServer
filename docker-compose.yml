@@ -1,26 +1,28 @@
 services:
   asic-pool:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: asic-pool
+    # Use the image you pushed to Docker Hub
+    image: ajaysaini717/bdag:v1.6.3
     container_name: asic-pool
     restart: unless-stopped
-    
-    # Use host network for easy access to both devnet nodes and local postgres
-    network_mode: host
-    
+    ports:
+      - "3334:3334"
     environment:
       # Stratum Server
       POOL_PORT: ${POOL_PORT:-3334}
       
-      # Node RPC (DAG) - connects to asic-0 on the devnet
-      NODE_RPC_URL: ${NODE_RPC_URL:-http://192.168.202.2:2001}
-      NODE_RPC_USER: ${NODE_RPC_USER:-test}
-      NODE_RPC_PASS: ${NODE_RPC_PASS:-test}
+      # Node RPC (DAG) - connects to devnet
+      NODE_RPC_URL: ${NODE_RPC_URL}
+      NODE_RPC_USER: ${NODE_RPC_USER}
+      NODE_RPC_PASS: ${NODE_RPC_PASS}
       
       # Wallet RPC (EVM) - for payouts
-      WALLET_RPC_URL: ${WALLET_RPC_URL:-http://192.168.202.2:2002}
+      WALLET_RPC_URL: ${WALLET_RPC_URL}
+      
+      # Database - connects to pool-db container
+      PG_URL: ${PG_URL:-postgres://test:test@pool-db:5432/pool}
+      
+      # IPFS - connects to ipfs container
+      IPFS_NODE_URL: ${IPFS_NODE_URL:-http://ipfs:5001}
       
       # PPLNS Configuration
       PPLNS_N_WORK: ${PPLNS_N_WORK:-1000}
@@ -30,20 +32,21 @@ services:
       POOL_PAYOUT_MATURITY: ${POOL_PAYOUT_MATURITY:-50}
       POOL_FEE_PERCENTAGE: ${POOL_FEE_PERCENTAGE:-2.0}
       
-      # Database
-      PG_URL: ${PG_URL:-postgres://test:test@127.0.0.1:5432/pool}
-      
-      # Wallet Private Key (for payouts)
       POOL_PRIVATE_KEY: ${POOL_PRIVATE_KEY:-}
       TZ: Asia/Kolkata
+      LOG_ROTATION_INTERVAL: ${LOG_ROTATION_INTERVAL:-1h}
 
+    depends_on:
+      pool-db:
+        condition: service_healthy
+      ipfs:
+        condition: service_started
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
 
-  # Optional: Include the pool database if not running separately
   pool-db:
     image: postgres:15-alpine
     container_name: pool-db
@@ -51,15 +54,34 @@ services:
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_USER: test
-      POSTGRES_PASSWORD: test
-      POSTGRES_DB: pool
+      POSTGRES_USER: ${PG_USER:-test}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-test}
+      POSTGRES_DB: ${PG_DB:-pool}
       TZ: Asia/Kolkata
     volumes:
-      - pool-db-data:/var/lib/postgresql/data
+      - ./db_data:/var/lib/postgresql/data  # Data saved to local 'db_data' folder
       - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
-    profiles:
-      - with-db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-test} -d ${PG_DB:-pool}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
-volumes:
-  pool-db-data:
+  ipfs:
+    image: ipfs/kubo:latest
+    container_name: ipfs
+    restart: unless-stopped
+    command: ["daemon", "--migrate=true", "--enable-pubsub-experiment"]
+    volumes:
+      - ./ipfs_export:/export               # Logs saved to local 'ipfs_export' folder
+      - ./ipfs_data:/data/ipfs              # Config saved to local 'ipfs_data' folder
+    ports:
+      - "4001:4001"
+      - "4001:4001/udp"
+
+  adminer:
+    image: adminer
+    container_name: pool-adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
